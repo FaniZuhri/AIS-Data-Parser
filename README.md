@@ -12,6 +12,7 @@ bit offsets, pure functions.
 [Names](#names) ·
 [Requirements](#requirements) ·
 [Quickstart](#quickstart) ·
+[Testing it on your own data](#testing-it-on-your-own-data) ·
 [Usage](#usage) ·
 [Output](#output) ·
 [Coverage](#coverage) ·
@@ -75,6 +76,66 @@ python main.py tests/fixtures/mixed_stream.txt --format csv > decoded.csv
 
 Without activating the shell, prefix each with `pipenv run`.
 
+## Testing it on your own data
+
+Drop a capture anywhere and point the tool at it. `tests/fixtures/AIS_Test_270726.txt`
+is a real one to try first — 105 `$GPRMC` sentences at 1 Hz plus 16 `!AIVDM`
+sentences, recorded in Jakarta Bay on 2026-07-27.
+
+```sh
+cd /path/to/aivdm_decoder
+
+# 1. Decode the lot into a file. Progress summary on stderr, records in the file.
+python main.py tests/fixtures/AIS_Test_270726.txt -o decoded.jsonl
+#   -> aivdm: 121 sentence(s) decoded, 0 skipped, 0 problem(s), 5 vessel(s)
+
+# 2. Just the ships: one row per vessel, nothing else. 6 records, not 121.
+python main.py tests/fixtures/AIS_Test_270726.txt --mode summary -o ships.csv
+
+# 3. Human-readable, one block per sentence. Page through it rather than
+#    scrolling.
+python main.py tests/fixtures/AIS_Test_270726.txt -o decoded.txt
+less decoded.txt
+
+# 4. AIS only, no GPS noise.
+grep '!AIVD' tests/fixtures/AIS_Test_270726.txt | python main.py -o ais_only.txt
+
+# 5. Live: append to one file as the stream comes in.
+tail -f /path/to/live.log | python main.py --append -o today.jsonl
+```
+
+To sanity-check the output, pull the vessel positions out and drop them on a
+map — for a Jakarta Bay capture the coordinates should land in Jakarta Bay:
+
+```sh
+python main.py tests/fixtures/AIS_Test_270726.txt --mode summary -o ships.csv
+python -c "
+import csv
+for r in csv.DictReader(open('ships.csv')):
+    if r['kind'] == 'vessel':
+        print(r['mmsi'], r['name'] or '-', r['lat_deg'], r['lon_deg'])
+"
+```
+
+Useful flags while investigating a file:
+
+| Flag | Use |
+|---|---|
+| `-v` | print per-line warnings as they happen, not just a count at the end |
+| `--checksum drop` | discard sentences with a bad checksum, instead of decoding them anyway |
+| `--checksum require` | also discard sentences with no checksum at all |
+| `--no-track` | stateless: one record per sentence, no vessel join |
+| `--exit-on-error` | stop at the first malformed line and exit 3 — good for finding a bad file fast |
+| `--errors strict` | fail on undecodable bytes instead of replacing them |
+
+If a line is not decoding as you expect, check it is really the sentence you
+think it is. The tool reports the declared *and* computed checksum on every
+record, so a mismatch is visible:
+
+```sh
+python main.py bad.log --format table | grep BAD
+```
+
 ## Usage
 
 ```
@@ -82,9 +143,17 @@ python main.py [INPUT]
 
   INPUT                      NMEA log file, or '-' for stdin (default: stdin)
 
-  --format {json,table,csv}  output format (default: json = JSON Lines)
-  --mode {sentence,vessel}   one record per input sentence (default), or one
-                             per vessel update
+  -o, --output PATH          write records to PATH instead of stdout; '-' means
+                             stdout (default). Format is inferred from the
+                             extension unless --format is given
+  --append                   append to --output instead of overwriting it
+  --format {json,table,csv}  output format; default inferred from --output's
+                             extension (.json/.jsonl -> json, .csv -> csv,
+                             .txt/.log -> table), else json
+  --mode {sentence,vessel,summary}
+                             one record per input sentence (default); one per
+                             vessel update; or 'summary' for just the final
+                             joined vessel table, one record per vessel
   --vessels                  after the stream ends, dump the joined vessel table
   --track / --no-track       maintain the per-MMSI vessel store (default: on)
   --checksum {report,drop,require}
@@ -103,14 +172,66 @@ python main.py [INPUT]
 Exit codes: `0` success, `1` I/O error, `2` usage error, `3` `--exit-on-error`
 tripped.
 
+### Storing the output instead of scrolling it
+
+A 127-line capture is 121 records, which is a lot of terminal. Send it to a file
+with `-o`; the format follows the extension:
+
+```sh
+python main.py capture.log -o decoded.jsonl   # JSON Lines
+python main.py capture.log -o decoded.csv     # spreadsheet
+python main.py capture.log -o decoded.txt     # human-readable
+```
+
+`--format` overrides the extension if you want a mismatch, and `--output -`
+explicitly means stdout. The run summary still goes to stderr, so you keep
+progress feedback while the records go to the file.
+
+For a live feed, `--append` keeps adding to the same file, and the CSV header is
+only written once:
+
+```sh
+python main.py --append -o today.csv < /dev/ttyUSB0
+```
+
+If you do not want the per-sentence stream at all, take just the picture at the
+end. `--mode summary` reads everything but emits only the final vessel table,
+one record per vessel — on the 127-line capture that is 6 records instead of 121:
+
+```sh
+python main.py capture.log --mode summary -o ships.csv
+```
+
+Six records instead of 121. The full CSV has 19 columns; trimmed to the
+interesting ones, the 127-line capture gives:
+
+```
+kind,mmsi,name,lat_deg,lon_deg,sog_knots,nav_status
+own_ship,,,-6.096533,106.738239,,
+vessel,525000036,BUOYS-RED01-99%,-6.060703,106.71928,0.3,
+vessel,525005002,,-6.005112,106.799117,14.5,0
+vessel,525015954,NUSANTARA REGAS 1,-5.975225,106.799272,0.0,5
+vessel,525100325,,-6.107688,106.80949,0.0,8
+vessel,538007503,,,-5.897428,106.849233,10.6,0
+```
+
+In summary mode a malformed line is still counted in the stderr problem total,
+but it does not get a row in the ship table — the point of the mode is the final
+picture, not the traffic.
+
 ### Nothing is dropped
 
-Every input line produces exactly one record. A malformed line, an unmodelled
-sentence formatter, an AIS message type with no decoder, and a multi-fragment
-message still waiting for its other half all emit an explicit record rather than
-disappearing. Lines beginning with `#` are treated as comments and skipped —
-capture logs commonly carry headers, and `#` can never be a valid NMEA
-introducer.
+In the default mode every input line produces exactly one record. A malformed
+line, an unmodelled sentence formatter, an AIS message type with no decoder, and
+a multi-fragment message still waiting for its other half all emit an explicit
+record rather than disappearing. Lines beginning with `#` are treated as
+comments and skipped — capture logs commonly carry headers, and `#` can never be
+a valid NMEA introducer.
+
+`--mode summary` is the one exception, and it is opt-in: it deliberately emits
+only the final vessel table. Every line is still read and every problem still
+counted on stderr, so nothing goes unnoticed — there just are no per-sentence
+rows.
 
 ## Output
 
@@ -219,7 +340,7 @@ own-ship AIS identity are linked only through the `AIVDO` stream.
 Correctness was established three ways, because a single wrong bit offset
 silently produces confident, wrong vessel positions:
 
-1. **247 unit tests** (`pytest`), built around real sentences whose
+1. **280 unit tests** (`pytest`), built around real sentences whose
    checksums are published or independently computed. Every fixture sentence is
    checksum-verified — if you add one, verify it too.
 2. **Independent oracle** (`tools/oracle_check.py`). Every message type is

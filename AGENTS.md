@@ -43,8 +43,9 @@ working. `python -m aivdm` must stay equivalent.
 pipenv install --dev
 pipenv shell
 
-python main.py tests/fixtures/mixed_stream.txt --format table
-pytest                     # 247 tests
+python main.py tests/fixtures/mixed_stream.txt -o decoded.jsonl
+python main.py tests/fixtures/mixed_stream.txt --mode summary -o ships.csv
+pytest                     # 280 tests
 pytest --cov=aivdm --cov-report=term-missing
 ruff check .
 mypy aivdm                 # strict = true
@@ -52,6 +53,23 @@ mypy aivdm                 # strict = true
 
 `ruff`, `mypy`, and `pytest` must **all** be clean before a change is finished.
 `mypy --strict` is not negotiable — it is what keeps the Rust port mechanical.
+
+### Output sink
+
+`-o/--output PATH` writes records to a file; the format is inferred from the
+extension (`.json`/`.jsonl`/`.ndjson` → json, `.csv` → csv, `.txt`/`.table`/
+`.log` → table) unless `--format` is given explicitly. `-o -` means stdout.
+`--append` adds to an existing file and suppresses a duplicate CSV header.
+`--mode summary` emits only the final joined table, one record per vessel.
+
+Two behaviours to preserve when touching this code:
+
+- The run summary stays on **stderr**, so it is still visible when records go to
+  a file. `-q` silences it.
+- `--mode summary` is the one place records are deliberately withheld: it
+  suppresses the per-sentence stream *and* malformed-line records, because the
+  point is the final picture. Every line is still read and every problem still
+  counted on stderr. Do not "restore" the per-sentence records there.
 
 ## 3. Hard invariants
 
@@ -128,6 +146,15 @@ crash because nobody notices.
    with an `!AIVDM` type 5 that shares a talker, channel and sequential id.
    Keep that shape — it is the only end-to-end guard against the splice in §6.
    Do not "tidy" it by separating the two streams.
+   `tests/fixtures/AIS_Test_270726.txt` is a 127-line **real capture** (105
+   `$GPRMC` at 1 Hz + 16 `!AIVDM`, Jakarta Bay, 2026-07-27) and is the strongest
+   guard against over-fitting to hand-built vectors. `tests/test_capture.py`
+   pins it: all 121 checksums verify, 5 vessels join, a channel-B two-fragment
+   type 5 reassembles to 424 bits, a sentence transmitted 4× is emitted 4×, and
+   the requester's original sample appears verbatim at line 36. Do not edit or
+   "clean" that file — its value is that it is unmodified field data.
+   Expect real data to exercise the `0 → None` rule: that type 5 sends all four
+   dimension fields as 0, so they decode to `null`.
 2. **Independent oracle.** `tools/oracle_check.py` encodes each type from known
    field values with `pyais` and decodes with this library. Run it in a
    throwaway venv outside the project:
