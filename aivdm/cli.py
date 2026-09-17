@@ -13,9 +13,11 @@ import csv
 import json
 import sys
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import IO, Any
+from pathlib import Path
+from typing import IO, Any, Final
 
 from aivdm import __version__
 from aivdm.ais import AisFragment, FragmentAssembler, parse_aivdm
@@ -62,6 +64,52 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# Chosen so `-o capture.jsonl` / `-o ships.csv` does the obvious thing without
+# needing --format as well.
+_FORMAT_BY_SUFFIX: Final[dict[str, str]] = {
+    ".json": "json",
+    ".jsonl": "json",
+    ".ndjson": "json",
+    ".csv": "csv",
+    ".txt": "table",
+    ".table": "table",
+    ".log": "table",
+}
+
+
+def _resolve_format(args: argparse.Namespace) -> str:
+    """Explicit --format wins; otherwise infer from the output extension."""
+    if args.format:
+        return str(args.format)
+    if args.output and args.output != "-":
+        return _FORMAT_BY_SUFFIX.get(Path(args.output).suffix.lower(), "json")
+    return "json"
+
+
+@contextmanager
+def _open_output(args: argparse.Namespace) -> Iterator[IO[str]]:
+    """Yield the output stream, opening a file when one was requested."""
+    if not args.output or args.output == "-":
+        yield sys.stdout
+        return
+    mode = "a" if args.append else "w"
+    # newline="" stops the platform translating the "\n" we write explicitly.
+    with open(args.output, mode, encoding="utf-8", newline="") as handle:
+        yield handle
+
+
+def _needs_csv_header(args: argparse.Namespace) -> bool:
+    """Suppress the CSV header when appending to a file that already has one."""
+    if _resolve_format(args) != "csv":
+        return False
+    if not args.append or not args.output or args.output == "-":
+        return True
+    try:
+        return Path(args.output).stat().st_size == 0
+    except OSError:
+        return True
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="aivdm",
@@ -74,16 +122,38 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="NMEA log file, or '-' for stdin (default: stdin)",
     )
     parser.add_argument(
+        "-o",
+        "--output",
+        metavar="PATH",
+        default="-",
+        help=(
+            "write records to PATH instead of stdout; '-' means stdout (default). "
+            "The format is inferred from the extension unless --format is given"
+        ),
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="append to --output instead of overwriting it (for a live capture)",
+    )
+    parser.add_argument(
         "--format",
         choices=("json", "table", "csv"),
-        default="json",
-        help="output format (default: json, i.e. JSON Lines)",
+        default=None,
+        help=(
+            "output format; default is inferred from --output's extension "
+            "(.json/.jsonl -> json, .csv -> csv, .txt/.log -> table), else json"
+        ),
     )
     parser.add_argument(
         "--mode",
-        choices=("sentence", "vessel"),
+        choices=("sentence", "vessel", "summary"),
         default="sentence",
-        help="one record per input sentence (default), or one per vessel update",
+        help=(
+            "one record per input sentence (default); one per vessel update; "
+            "or 'summary' for just the final joined vessel table, one record per "
+            "vessel, and nothing else"
+        ),
     )
     parser.add_argument(
         "--vessels",
@@ -136,12 +206,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 class _Emitter:
     """Writes records in the selected format."""
 
-    def __init__(self, stream: IO[str], fmt: str) -> None:
+    def __init__(self, stream: IO[str], fmt: str, *, include_csv_header: bool = True) -> None:
         self._stream = stream
         self._fmt = fmt
-        self._csv_header_written = False
+        self._csv_header_written = not include_csv_header
         if fmt == "csv":
-            self._csv_writer = csv.writer(stream)
+            # The csv module defaults to CRLF (RFC 4180). Use LF so all three
+            # formats emit identical line endings: this output is meant to be
+            # piped, and every mainstream CSV consumer accepts LF.
+            self._csv_writer = csv.writer(stream, lineterminator="\n")
 
     def emit(self, record: dict[str, Any]) -> None:
         if self._fmt == "json":
@@ -306,6 +379,9 @@ def _iter_lines(args: argparse.Namespace) -> Iterator[tuple[int, str]]:
 def _run(args: argparse.Namespace, emitter: _Emitter) -> int:
     store = VesselStore()
     assembler = FragmentAssembler()
+    # Summary mode still reads everything to build the vessel table, but holds
+    # back the per-sentence stream so the output is just the final picture.
+    summary_only = args.mode == "summary"
 
     counted = 0
     skipped = 0
@@ -337,11 +413,15 @@ def _run(args: argparse.Namespace, emitter: _Emitter) -> int:
                 sentence = parse_sentence(line)
             except MalformedSentence as error:
                 warn(f"line {line_no}: {error}")
-                emitter.emit(
-                    _error_record(
-                        line_no=line_no, rx_time=rx_time, raw=line.rstrip(), error=str(error)
+                if not summary_only:
+                    # Summary mode is the final vessel picture only; a malformed
+                    # line still counts toward the stderr problem total, but does
+                    # not get a row in a ship table.
+                    emitter.emit(
+                        _error_record(
+                            line_no=line_no, rx_time=rx_time, raw=line.rstrip(), error=str(error)
+                        )
                     )
-                )
                 if args.exit_on_error:
                     return EXIT_STOPPED_ON_ERROR
                 continue
@@ -360,7 +440,7 @@ def _run(args: argparse.Namespace, emitter: _Emitter) -> int:
             else:
                 record = _handle_gps(args, sentence, line_no, rx_time, store)
 
-            if record is not None:
+            if record is not None and not summary_only:
                 emitter.emit(record)
 
             if args.exit_on_error and errors:
@@ -372,7 +452,25 @@ def _run(args: argparse.Namespace, emitter: _Emitter) -> int:
         print(f"aivdm: {error}", file=sys.stderr)
         return EXIT_IO_ERROR
 
-    if args.vessels and args.track:
+    if summary_only:
+        # One record per vessel rather than one nested snapshot, so a CSV gets a
+        # row per ship instead of a single row with every ship's columns spliced
+        # side by side.
+        own = store.own_ship
+        if own is not None:
+            emitter.emit(
+                {
+                    "rx_time": _utc_now(),
+                    "kind": "own_ship",
+                    "own_mmsi": store.own_mmsi,
+                    "own_ship": own.to_dict(),
+                }
+            )
+        for vessel in store.all():
+            emitter.emit(
+                {"rx_time": _utc_now(), "kind": "vessel", "vessel": vessel.to_dict()}
+            )
+    elif args.vessels and args.track:
         emitter.emit(
             {
                 "rx_time": _utc_now(),
@@ -484,12 +582,28 @@ def _handle_gps(
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
 
-    if args.mode == "vessel" and not args.track:
-        print("aivdm: --mode vessel requires tracking; drop --no-track", file=sys.stderr)
+    if args.mode in ("vessel", "summary") and not args.track:
+        print(
+            f"aivdm: --mode {args.mode} requires tracking; drop --no-track",
+            file=sys.stderr,
+        )
         return EXIT_USAGE
     if args.vessels and not args.track:
         print("aivdm: --vessels requires tracking; drop --no-track", file=sys.stderr)
         return EXIT_USAGE
+    if args.append and args.output in ("-", None):
+        print("aivdm: --append needs --output PATH", file=sys.stderr)
+        return EXIT_USAGE
 
-    emitter = _Emitter(sys.stdout, args.format)
-    return _run(args, emitter)
+    try:
+        with _open_output(args) as stream:
+            emitter = _Emitter(
+                stream,
+                _resolve_format(args),
+                include_csv_header=_needs_csv_header(args),
+            )
+            return _run(args, emitter)
+    except OSError as error:
+        # e.g. a missing directory or no write permission
+        print(f"aivdm: {error}", file=sys.stderr)
+        return EXIT_IO_ERROR

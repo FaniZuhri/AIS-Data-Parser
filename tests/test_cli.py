@@ -301,6 +301,152 @@ class TestFormats:
         assert ever["destination"] == "NEW YORK"
 
 
+class TestOutputSink:
+    """-o/--output: the records go to a file, not the terminal."""
+
+    def test_writes_to_a_file_and_leaves_stdout_empty(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "out.jsonl"
+        code, out, err = run(str(MIXED_FIXTURE), "-o", str(target), capsys=capsys)
+        assert code == EXIT_OK
+        assert out == ""  # nothing on stdout
+        # 15 sentences parse; the 16th is malformed and still counted as a problem.
+        assert "15 sentence(s)" in err
+        assert "1 problem(s)" in err
+        lines = target.read_text().splitlines()
+        assert len([line for line in lines if line.strip()]) == 16
+
+    def test_dash_means_stdout(self, capsys: pytest.CaptureFixture[str]) -> None:
+        code, out, _ = run(str(MIXED_FIXTURE), "-o", "-", capsys=capsys)
+        assert code == EXIT_OK
+        assert out.count("\n") == 16
+
+    @pytest.mark.parametrize(
+        ("suffix", "first_line_start"),
+        [
+            (".jsonl", '{"rx_time"'),
+            (".json", '{"rx_time"'),
+            (".ndjson", '{"rx_time"'),
+            (".csv", "line_no,rx_time,kind"),
+        ],
+    )
+    def test_format_is_inferred_from_the_extension(
+        self, tmp_path: Path, suffix: str, first_line_start: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / f"out{suffix}"
+        run(str(MIXED_FIXTURE), "-o", str(target), capsys=capsys)
+        first_line = target.read_text().splitlines()[0]
+        assert first_line.startswith(first_line_start), first_line
+
+    @pytest.mark.parametrize("suffix", [".txt", ".log", ".table"])
+    def test_table_extension_selects_the_table_format(
+        self, tmp_path: Path, suffix: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / f"out{suffix}"
+        run(str(MIXED_FIXTURE), "-o", str(target), capsys=capsys)
+        first_line = target.read_text().splitlines()[0]
+        # A table block header, not JSON and not CSV.
+        assert first_line.startswith("#")
+        assert "checksum=" in first_line
+
+    def test_unknown_extension_falls_back_to_json(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "out.dat"
+        run(str(MIXED_FIXTURE), "-o", str(target), capsys=capsys)
+        assert target.read_text().splitlines()[0].startswith('{"rx_time"')
+
+    def test_explicit_format_overrides_the_extension(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "out.csv"
+        run(str(MIXED_FIXTURE), "-o", str(target), "--format", "json", capsys=capsys)
+        assert target.read_text().splitlines()[0].startswith('{"rx_time"')
+
+    def test_append_adds_to_the_file_without_repeating_the_csv_header(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "grow.csv"
+        run(str(MIXED_FIXTURE), "-o", str(target), capsys=capsys)
+        first = target.read_text()
+        run(str(MIXED_FIXTURE), "-o", str(target), "--append", capsys=capsys)
+        appended = target.read_text()
+
+        assert appended.startswith(first)
+        assert appended.count("line_no,rx_time,kind") == 1
+        assert len(list(csv.DictReader(io.StringIO(appended)))) == 32  # 16 + 16
+
+    def test_overwrites_by_default(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        target = tmp_path / "out.jsonl"
+        target.write_text("stale content\n")
+        run(str(MIXED_FIXTURE), "-o", str(target), capsys=capsys)
+        assert "stale content" not in target.read_text()
+
+    def test_append_without_output_is_a_usage_error(self, capsys: pytest.CaptureFixture[str]) -> None:
+        code, _, err = run(str(MIXED_FIXTURE), "--append", capsys=capsys)
+        assert code == EXIT_USAGE
+        assert "--append needs --output" in err
+
+    def test_unwritable_output_is_an_io_error(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        code, _, err = run(str(MIXED_FIXTURE), "-o", str(tmp_path / "nope" / "out.jsonl"), capsys=capsys)
+        assert code == 1
+        assert "aivdm:" in err
+
+
+class TestSummaryMode:
+    """--mode summary: only the final joined picture, one record per vessel."""
+
+    def test_emits_one_record_per_vessel_and_nothing_else(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "ships.jsonl"
+        code, _, _ = run(str(MIXED_FIXTURE), "--mode", "summary", "-o", str(target), capsys=capsys)
+        assert code == EXIT_OK
+
+        records = [json.loads(line) for line in target.read_text().splitlines() if line.strip()]
+        kinds = [record["kind"] for record in records]
+        # 5 vessels plus own ship, versus 16 records in sentence mode.
+        assert len(records) == 6
+        assert kinds.count("vessel") == 5
+        assert kinds.count("own_ship") == 1
+        assert "ais" not in kinds
+        assert "gps" not in kinds
+
+    def test_csv_gives_one_row_per_vessel(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "ships.csv"
+        run(str(MIXED_FIXTURE), "--mode", "summary", "-o", str(target), capsys=capsys)
+        rows = list(csv.DictReader(io.StringIO(target.read_text())))
+        by_mmsi = {row["mmsi"]: row for row in rows if row["mmsi"]}
+        assert len(by_mmsi) == 5
+        assert by_mmsi["367533950"]["name"] == "EVER DIADEM"
+        assert by_mmsi["525100123"]["name"] == "OWN SHIP"
+        assert by_mmsi["993691015"]["name"] == "FORELAND POINT"
+
+    def test_vessels_are_ordered_by_mmsi(self, capsys: pytest.CaptureFixture[str]) -> None:
+        _, records, _ = run_lines(str(MIXED_FIXTURE), "--mode", "summary", capsys=capsys)
+        mmis = [record["vessel"]["mmsi"] for record in records if record["kind"] == "vessel"]
+        assert mmis == sorted(mmis)
+
+    def test_requires_tracking(self, capsys: pytest.CaptureFixture[str]) -> None:
+        code, _, err = run("--mode", "summary", "--no-track", capsys=capsys)
+        assert code == EXIT_USAGE
+        assert "requires tracking" in err
+
+    def test_summary_of_the_real_capture_is_compact(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        target = tmp_path / "ships.csv"
+        run(str(FIXTURES / "AIS_Test_270726.txt"), "--mode", "summary", "-o", str(target), capsys=capsys)
+        rows = list(csv.DictReader(io.StringIO(target.read_text())))
+        # 121 input sentences collapse to 5 vessels plus own ship.
+        assert len(rows) == 6
+
+
 class TestEmitterUnits:
     """The writers are also exercised directly, without the CLI loop."""
 
