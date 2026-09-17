@@ -1,0 +1,37 @@
+# An interleaved marine stream: a GPS receiver and an AIS transponder sharing
+# one serial line. This is the shape the decoder is built for, and it exercises
+# the own-ship GPS fix, the own-ship AIS stream (!AIVDO), the per-MMSI vessel
+# join, multi-fragment reassembly across two independent streams, and the
+# malformed-input paths all in one pass.
+#
+# Own ship's GNSS fix arrives first.
+$GPGGA,120000.00,4807.038,N,01131.000,E,1,09,0.8,545.4,M,46.9,M,,*67
+$GPGLL,4916.45,N,12311.12,W,225444,A*31
+# A malformed line: no introducer. Must be reported, not silently dropped.
+this is not a sentence
+# A sentence whose checksum is wrong. Must still be decoded by default.
+$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*00
+# Own ship's own AIS report (!AIVDO). Note this is what sets own_mmsi.
+!AIVDO,1,1,,A,17liTFh010Wa7O9t`1qkTBqH0000,0*0B
+# Received traffic on channel A: the vessel the requester asked about.
+!AIVDM,1,1,,A,3815GkhOib7a7O9t`1qqi`?H00gP,0*52
+# Type 18 Class B position from another vessel.
+!AIVDM,1,1,,A,B5NJ;PP0Emkw8`UJ;bv3U`g5SP06,0*53
+# Two multi-fragment type 5 messages, one per stream, with identical talker,
+# channel and sequential id. They must NOT share a reassembly slot: interleaving
+# them is the exact case that produces a spliced payload if the formatter is
+# left out of the reassembly key.
+!AIVDO,2,1,0,A,57liTFh2Fe3uTC7;?@0uLr1<PU000000000000161P6226HbN6BPBhDU0@00,0*47
+!AIVDM,2,1,0,A,55NPOOP2;H;s<HtKP00EHE:0@T4@Dl0000000016L961O5GfNNkQEp6ClRh0,0*71
+# A GPS sentence interleaved mid-message: reassembly must survive it.
+$GPZDA,201530.00,04,07,2002,00,00*60
+# Both second fragments, own ship first. Each completes its own message.
+!AIVDO,2,2,0,A,00000000000,2*26
+!AIVDM,2,2,0,A,00000000000,2*24
+# Type 24 Part A and Part B for one vessel, arriving out of order.
+!AIVDM,1,1,,A,H5NJ;PU6123<30qG43ijkl3h<440,0*3A
+!AIVDM,1,1,,A,H5NJ;PQ@E=B1HE=<Dh0000000000,0*0E
+# An aid to navigation.
+!AIVDM,1,1,,A,E>kb5Qo37a2V0W2@87TW:000000@3AFL>de5000003sP0000000000000000,4*6B
+# An unmodelled sentence formatter: passed through, not dropped.
+$INDPT,2.3,0.0*46

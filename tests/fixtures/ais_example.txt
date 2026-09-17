@@ -1,0 +1,24 @@
+# Real AIS sentences. Every checksum here was verified by two independent
+# implementations, and every decode was cross-checked against pyais.
+#
+# The first line is the sample supplied by the requester.
+!AIVDM,1,1,,A,3815GkhOib7a7O9t`1qqi`?H00gP,0*52
+!AIVDM,1,1,,A,13HOI:541swceR8Kqmr4lSkDP0gP,0*5E
+!AIVDM,1,1,,A,403OviQvQGfN<rw02@HFpB100000,0*1E
+!AIVDM,2,1,0,A,55NPOOP2;H;s<HtKP00EHE:0@T4@Dl0000000016L961O5GfNNkQEp6ClRh0,0*71
+!AIVDM,2,2,0,A,00000000000,2*24
+!AIVDM,1,1,,A,91b55wi;hbS4on`Avej1FCh0089h,0*68
+!AIVDM,1,1,,A,B5NJ;PP0Emkw8`UJ;bv3U`g5SP06,0*53
+!AIVDM,1,1,,A,C5N3SRP0=fCu28T:`Q`oPe3P62Pa0DNV:P@000000000J1p:2220,0*5D
+!AIVDM,1,1,,A,E>kb5Qo37a2V0W2@87TW:000000@3AFL>de5000003sP0000000000000000,4*6B
+!AIVDM,1,1,,A,H5NJ;PQ@E=B1HE=<Dh0000000000,0*0E
+!AIVDM,1,1,,A,H5NJ;PU6123<30qG43ijkl3h<440,0*3A
+!AIVDM,1,1,,A,K35E2bKm18PFbLbL,0*47
+#
+# Own-ship reports. Identical payload format, but !AIVDO -- the messages a
+# transponder generates about itself rather than ones it received. Note they
+# share the "AI" talker, channel A, and sequential id 0 with the type 5 above,
+# which is exactly why the reassembler keys on the formatter as well.
+!AIVDO,1,1,,A,17liTFh010Wa7O9t`1qkTBqH0000,0*0B
+!AIVDO,2,1,0,A,57liTFh2Fe3uTC7;?@0uLr1<PU000000000000161P6226HbN6BPBhDU0@00,0*47
+!AIVDO,2,2,0,A,00000000000,2*26

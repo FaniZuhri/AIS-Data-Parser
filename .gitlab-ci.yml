@@ -1,0 +1,40 @@
+stages:
+  - lint
+  - test
+
+default:
+  image: python:3.11.9-slim
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .venv/
+      - .pipenv-cache/
+  before_script:
+    - pip install --quiet pipenv
+
+variables:
+  PIPENV_VENV_IN_PROJECT: "1"
+  PIPENV_CACHE_DIR: "$CI_PROJECT_DIR/.pipenv-cache"
+  PIPENV_NOSPIN: "1"
+
+lint:
+  stage: lint
+  script:
+    - pipenv install --dev --deploy
+    - pipenv run ruff check .
+    - pipenv run mypy aivdm
+
+test:
+  stage: test
+  script:
+    - pipenv install --dev --deploy
+    - pipenv run pytest --cov=aivdm --cov-report=term --cov-report=xml
+  coverage: '/^TOTAL.+?(\d+\%)$/'
+  artifacts:
+    when: always
+    paths:
+      - coverage.xml
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.xml

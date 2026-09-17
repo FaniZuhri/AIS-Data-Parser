@@ -1,0 +1,23 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+# No runtime dependencies. The decoder is stdlib-only by design so it stays a
+# mechanical port target for Rust. See README.md.
+[packages]
+
+[dev-packages]
+pytest = "*"
+pytest-cov = "*"
+ruff = "*"
+mypy = "*"
+
+[requires]
+python_version = "3.11"
+python_full_version = "3.11.9"
+
+[scripts]
+test = "pytest"
+lint = "ruff check ."
+typecheck = "mypy aivdm"

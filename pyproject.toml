@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aivdm"
+version = "0.1.0"
+description = "AIVDM/AIVDO and NMEA 0183 GPS decoder for marine streams"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+aivdm = "aivdm.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["aivdm*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Reference NMEA sentences are single literals on purpose: splitting a published
+# sentence across lines makes it impossible to diff against the source it came
+# from. pytest-typed test signatures are also naturally long.
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["aivdm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
