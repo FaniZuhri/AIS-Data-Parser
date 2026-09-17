@@ -53,3 +53,6 @@ captures/
 # Secrets
 .env
 secrets.env
+
+# Local Command Code state: permission allowlist and taste learning
+.commandcode/
